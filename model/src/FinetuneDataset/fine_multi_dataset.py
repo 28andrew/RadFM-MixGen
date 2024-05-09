@@ -10,20 +10,21 @@ from torchvision import transforms
 from scispacy.abbreviation import AbbreviationDetector
 from scispacy.linking import EntityLinker
 
+# Data augmentations
 transform = transforms.Compose([
                 transforms.RandomResizedCrop([512,512],scale=(0.8, 1.0),
                                              interpolation=transforms.InterpolationMode.BICUBIC),
                 transforms.ToTensor(),
             ])
 
-
+# Convert PIL image to RGB & transform it
 def get_image(pil_img):
     image = pil_img.convert('RGB')
     image = transform(image)
     image = image.unsqueeze(-1)
     return image
 
-
+# Prompts for the model
 captions = [
             # "Can you provide a caption consists of finding and impression for this medical image?",
             "Describe the finding and impression of the medical image you see.",
@@ -81,6 +82,7 @@ captions_impression = [
 import pickle
 
 
+# Dataset class that mixes MixGen data with the normal data
 class MixgenDataset(Dataset):
     def __init__(self, dataset_path, split, mixgen_pickle_paths, mixgen_ratio=0.2):
         self.mixgen_data = []
@@ -96,15 +98,18 @@ class MixgenDataset(Dataset):
         gc.collect()
 
     def __len__(self):
+        # Effectively infinite size
         return int(1e9)
 
     def __getitem__(self, item):
+        # At mixgen_ratio frequency, use mixgen data
         if random.random() <= self.mixgen_ratio:
             return self.mixgen_data[random.randint(0, self.mixgen_length - 1)]
         else:
             return self.normal_data[random.randint(0, self.normal_length - 1)]
 
 
+# The dataset given by the challenge
 class InterpretCXRDataset(Dataset):
     def __init__(self, dataset_path, split, dataset=None):
         if dataset:
@@ -162,6 +167,7 @@ class InterpretCXRDataset(Dataset):
 
 WORDS_EXTRACT = None
 
+# From original RadFM, figures out what words to emphasize in loss
 class umls_extractor:
     def __init__(self):
         nlp = spacy.load("en_core_sci_lg")
@@ -194,6 +200,7 @@ def find_position(label, key_embeddings):
     return loss_reweight
 
 
+# Stacks images together
 def stack_images(images):
     target_H = 512
     target_W = 512
@@ -225,7 +232,7 @@ def stack_images(images):
     images = torch.cat(stack_images, dim=0)
     return images
 
-
+# The finetuning dataset class
 class FinetuneMultiDataset(Dataset):
     def __init__(self, text_tokenizer, dataset_path, split, max_seq = 2048, max_img_size = 100,
                  image_num=32,voc_size =32000, eval=False, dataset=None):
@@ -272,39 +279,23 @@ class FinetuneMultiDataset(Dataset):
         return len(self.data_whole)
 
     def __getitem__(self, idx):
-        # vision_x, lang_x, attention_mask, labels
+        # Read sample
         sample = list(self.data_whole[idx].items())[0]
-        # print(sample)
         dataset_index = sample[0]
         sample = self.dataset_reflect[sample[0]][sample[1]]
-        '''
-                Dict: {
-                    "image_dict": [
-                                    {"image": image, # image is a tensor of shape [c,w,h,d], c is channel=3, w is width, h is height, d is depth(1 for chestxray,pmcoa,pmcvqa)
-                                    "position": {"question": 0}}, position is a dict, random choice of 0 or len(question)
-                                ]
-                    "question": question,
-                    "answer":answer,
-                    }
-                '''
         images = sample["image_dict"]
         question = sample["question"]
         answer = sample["answer"]
-        # if idx == 0:
-        #     print(f']Sample {sample}')
+
+        # Add images to the text
         images, question, answer = self.text_add_image(images, question, answer)
-
-        # print(question,answer)
-        # print(f'Images shape: {sample["image_dict"][0]["image"].shape}')
-        ### make vision_x
+        # Stack images
         vision_x = stack_images(images)
-
-        # if idx == 0:
-        #     print(f']Vision x shape: {vision_x.shape}')
 
         ### make lang_x ###
         self.text_tokenizer.padding_side = "right"
         if not self.eval:
+            # This data is for the training loop
             text_tensor = self.text_tokenizer(
                 question + ' ' + answer, max_length=self.max_seq, truncation=True, padding="max_length",
                 return_tensors="pt"
@@ -316,7 +307,6 @@ class FinetuneMultiDataset(Dataset):
             except:
                 pass
 
-            emphasize_words = []
             emphasize_words = [str(_) for _ in get_word_extractor().extract(answer)]
 
             if emphasize_words != []:
@@ -343,12 +333,11 @@ class FinetuneMultiDataset(Dataset):
                     # 'key_words_query': emphasize_words,
                     'question': question, 'answer': answer, 'idx': idx}
         else:
+            # If evaluating, we only give these
             return {'vision_x': vision_x, 'question': question, 'answer': answer, 'idx': idx}
-        ### make label ###
-        # print(labels,key_embeddings,reweight_tensor)
-        # print(question)
 
     def text_add_image(self,images,question,answer):
+        # Add image tokens into the text
         ref_image = []
         question = str(question)
         answer = str(answer)

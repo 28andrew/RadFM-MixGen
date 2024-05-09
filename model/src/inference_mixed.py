@@ -6,25 +6,26 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import datasets
-import numpy as np
 import torch
 import torch.distributed as dist
 import transformers
+import wandb
 from torch.nn.modules.utils import consume_prefix_in_state_dict_if_present
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
-from transformers import LogitsProcessorList, LogitsProcessor
+from transformers import LogitsProcessor
 
-import wandb
 from FinetuneDataset.fine_multi_dataset import FinetuneMultiDataset
 from Model.RadFM.multimodality_model import MultiLLaMAForCausalLM
+
+# Dataclasses for model, dataset, and training arguments
 
 @dataclass
 class ModelArguments:
     lang_encoder_path: Optional[str] = field(
-        default="/gpfs/slayman/pi/gerstein/xt86/howard_dai/nlp-project/RadFM-finetune/src/Language_files")
+        default="./Language_files")
     tokenizer_path: str = field(
-        default='/gpfs/slayman/pi/gerstein/xt86/howard_dai/nlp-project/RadFM-finetune/src/Language_files',
+        default='./Language_files',
         metadata={"help": "Path to the tokenizer data."})
 
 
@@ -39,17 +40,18 @@ class TrainingArguments(transformers.TrainingArguments):
     batch_size_2D: int = field(default=1)
     batch_size_3D: int = field(default=1)
     output_dir: Optional[str] = field(
-        default="/gpfs/slayman/pi/gerstein/xt86/howard_dai/nlp-project/RadFM-finetune/output")
+        default="../output")
     cache_dir: Optional[str] = field(default=None)
     optim: str = field(default="adamw_torch")
 
-
+# World size for DDP
 WORLD_SIZE = torch.cuda.device_count()
 
 def main():
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args, remaining = parser.parse_args_into_dataclasses(return_remaining_strings=True)
 
+    # Read checkpoint #
     if len(sys.argv) < 2:
         print('Provide checkpoint #')
 
@@ -86,12 +88,6 @@ def train(rank, world_size, lang_encoder_path, tokenizer_path, checkpoint_file, 
     print(f'Loading LLaMA for {rank}')
     device = torch.device(f'cuda:{rank}')
     model = MultiLLaMAForCausalLM(lang_model_path=lang_encoder_path, device=device, peft=True, rank=rank)
-
-    # Original
-    # ckpt = torch.load('./Language_files/pytorch_model.bin', map_location='cpu')
-    # model.load_state_dict(ckpt, strict=False)
-    # model.make_peft()
-
     model = model.to(device)
 
     if checkpoint_file:
@@ -103,12 +99,14 @@ def train(rank, world_size, lang_encoder_path, tokenizer_path, checkpoint_file, 
         gc.collect()
         torch.cuda.empty_cache()
 
-    # model.unmerge()
+    # Set model into evaluation mode
     model.eval()
 
     if rank == 0:
+        # Use Wandb in main process
         wandb.init(project="RadFM-inference", name=f'inference-mixed-{ckpt_num}', resume="never")
 
+    # Load publci test dataset
     print('Loading interpret-cxr-test-public dataset')
     dataset = datasets.load_dataset("StanfordAIMI/interpret-cxr-test-public")['test']
     val_dataset = FinetuneMultiDataset(text_tokenizer=tokenizer_path, dataset_path=None,
@@ -124,22 +122,22 @@ def train(rank, world_size, lang_encoder_path, tokenizer_path, checkpoint_file, 
                             persistent_workers=True
                             )
 
-    finding_id = val_dataset.text_tokenizer.encode("Finding:", add_special_tokens=False)
-    impression_ids = val_dataset.text_tokenizer.encode("Impression", add_special_tokens=False)
-    print(f'Finding ids: {finding_id}')
-    print(f'Impression ids: {impression_ids}')
+    # finding_id = val_dataset.text_tokenizer.encode("Finding:", add_special_tokens=False)
+    # impression_ids = val_dataset.text_tokenizer.encode("Impression", add_special_tokens=False)
+    # print(f'Finding ids: {finding_id}')
+    # print(f'Impression ids: {impression_ids}')
     # Custom Logits Processor to discourage generating specific sequence of tokens
 
-    finding_id = torch.tensor(finding_id, device=device)
+    # finding_id = torch.tensor(finding_id, device=device)
 
-    class SequenceLogitsProcessor(LogitsProcessor):
-        def __call__(self, input_ids: torch.LongTensor, logits: torch.FloatTensor):
-            # print(f'Logits are {input_ids[0, -len(finding_id):]}')
-            if torch.equal(input_ids[0, -len(finding_id):], finding_id):
-                # print('Changing logits..')
-                for idx in impression_ids:
-                    logits[:, idx] = -float('Inf')
-            return logits
+    # class SequenceLogitsProcessor(LogitsProcessor):
+    #     def __call__(self, input_ids: torch.LongTensor, logits: torch.FloatTensor):
+    #         # print(f'Logits are {input_ids[0, -len(finding_id):]}')
+    #         if torch.equal(input_ids[0, -len(finding_id):], finding_id):
+    #             # print('Changing logits..')
+    #             for idx in impression_ids:
+    #                 logits[:, idx] = -float('Inf')
+    #         return logits
 
     progress_bar = tqdm(val_loader, desc=f"Rank {rank} - Test", total=len(val_loader))
     file_name = f'../output/inference-mixed-{os.path.basename(checkpoint_file)}-rank{rank}.csv'
@@ -147,6 +145,7 @@ def train(rank, world_size, lang_encoder_path, tokenizer_path, checkpoint_file, 
         writer = csv.writer(file)
         writer.writerow(["idx", "question", "answer", "prediction"])
         for i, item_raw in enumerate(progress_bar):
+            # Convert tensors to device
             item = {}
             for k, v in item_raw.items():
                 if hasattr(v, 'to'):
@@ -157,21 +156,25 @@ def train(rank, world_size, lang_encoder_path, tokenizer_path, checkpoint_file, 
             question = item["question"]
             answer = item['answer']
             idx = item['idx'].item()
+            # Tokenize question
             lang_x = val_dataset.text_tokenizer(
                 question, max_length=2048, truncation=True, return_tensors="pt"
             )['input_ids'].to(device)
             vision_x = item["vision_x"].to(device)
 
+            # Generate and decoe
             with torch.no_grad():
                 generation = model.generate(lang_x, vision_x)
-
             generated_text = val_dataset.text_tokenizer.batch_decode(generation, skip_special_tokens=True)[0]
 
+            # Write to CSV
             writer.writerow([idx, question[0], answer[0], generated_text])
-            if rank == 0:
-                wandb.log({"idx": i})
             if i % 10 == 0:
                 file.flush()
+
+            # Logging
+            if rank == 0:
+                wandb.log({"idx": i})
 
     cleanup()
 

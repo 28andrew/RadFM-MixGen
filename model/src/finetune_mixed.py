@@ -17,7 +17,7 @@ from tqdm import tqdm
 from FinetuneDataset.fine_multi_dataset import FinetuneMultiDataset, MixgenDataset
 from Model.RadFM.multimodality_model import MultiLLaMAForCausalLM
 
-
+# Dataclasses for model, data, and training arguments
 @dataclass
 class ModelArguments:
     lang_encoder_path: Optional[str] = field(
@@ -43,6 +43,7 @@ class TrainingArguments(transformers.TrainingArguments):
     optim: str = field(default="adamw_torch")
 
 
+# Collate together data fro training
 @dataclass
 class DataCollator(object):
 
@@ -58,6 +59,7 @@ class DataCollator(object):
         loss_reweight = torch.cat([_.unsqueeze(0) for _ in loss_reweight], dim=0)
         # print(lang_xs.shape,attention_masks.shape,labels.shape)
 
+        # Standardize image stack sizes
         target_H = 512
         target_W = 512
         target_D = 4
@@ -85,6 +87,7 @@ class DataCollator(object):
 
         vision_xs = [torch.nn.functional.interpolate(s, size=(target_H, target_W, target_D)) for s in vision_xs]
 
+        # Pad vision inputs
         vision_xs = torch.nn.utils.rnn.pad_sequence(
             vision_xs, batch_first=True, padding_value=0
         )
@@ -97,27 +100,18 @@ class DataCollator(object):
             loss_reweight=loss_reweight
         )
 
-
-def compute_metrics(eval_preds):
-    # metric = load_metric("glue", "mrpc")
-    ACCs = eval_preds.predictions
-    # print(ACCs)
-    return {"accuracy": np.mean(ACCs, axis=-1)}
-
-
+# Hyperparameters
 NUM_EPOCHS = 1
 LEARNING_RATE = 0.0002
+# Save setting
 SAVE_STEPS = 250
+
+# For DDP
 WORLD_SIZE = torch.cuda.device_count()
 
 
 def main():
-    # for arg in sys.argv:
-    #     if arg.startswith("--local-rank="):
-    #         rank = arg.split("=")[1]
-    #         sys.argv.remove(arg)
-    #         sys.argv.append('--local_rank')
-    #         sys.argv.append(rank)
+    # Parse arguments
     parser = transformers.HfArgumentParser((ModelArguments, DataArguments, TrainingArguments))
     model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
@@ -154,6 +148,7 @@ def cleanup():
 def train(rank, world_size, lang_encoder_path, tokenizer_path, checkpoint_file):
     setup(rank, world_size)
 
+    # Load dataset settings
     print('Loading dataset')
     dataset_path = '/gpfs/slayman/pi/gerstein/xt86/howard_dai/nlp-project/dataset/partial_data'
 
@@ -170,10 +165,10 @@ def train(rank, world_size, lang_encoder_path, tokenizer_path, checkpoint_file):
     print(f'Loading LLaMA for {rank}')
     device = torch.device(f'cuda:{rank}')
 
-    # If the model is resumed from a checkpoint
     start_epoch = 0
     global_step = 0
     if checkpoint_file:
+        # If the model is resumed from a checkpoint, load it
         model = MultiLLaMAForCausalLM(lang_model_path=lang_encoder_path, device=device, peft=True, rank=rank)
         model = model.to(device)
         model = DDP(model, device_ids=[rank])
@@ -183,6 +178,7 @@ def train(rank, world_size, lang_encoder_path, tokenizer_path, checkpoint_file):
         global_step = checkpoint['global_step']
         run_id = checkpoint['run_id']
     else:
+        # Load from scratch
         print('Starting model from scratch..')
         model = MultiLLaMAForCausalLM(lang_model_path='./Base/', device=device, peft=True, rank=rank)
         # ckpt = torch.load('./Language_files/pytorch_model.bin', map_location='cpu')
@@ -193,11 +189,11 @@ def train(rank, world_size, lang_encoder_path, tokenizer_path, checkpoint_file):
         run_id = wandb.util.generate_id()
 
     if rank == 0:
+        # Use wandb in the first process
         wandb.init(project="RadFM-finetune", id='mixed-' + run_id, resume='allow')
 
-        # del ckpt
-
     if checkpoint_file:
+        # Load actual checkpoint
         model.load_state_dict(checkpoint['model'], strict=False)
         del checkpoint['model']
         gc.collect()
@@ -206,11 +202,12 @@ def train(rank, world_size, lang_encoder_path, tokenizer_path, checkpoint_file):
     optimizer = AdamW(model.parameters(), lr=LEARNING_RATE)
     # optimizer = bnb.optim.PagedAdam8bit(model.parameters(), lr=LEARNING_RATE)
 
+    # Load dataset
     mix_dataset = MixgenDataset(dataset_path, 'train', pickle_paths, 0.15)
     train_dataset = FinetuneMultiDataset(text_tokenizer=tokenizer_path, dataset_path=dataset_path, split='train',
                                          dataset=mix_dataset)
 
-    # Prepare DataLoader. No DistributedSampler needed
+    # Prepare DataLoader. No DistributedSampler needed for MixGen data
     # train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
     train_loader = DataLoader(train_dataset, batch_size=8, collate_fn=DataCollator(),
                               num_workers=0,
@@ -218,15 +215,13 @@ def train(rank, world_size, lang_encoder_path, tokenizer_path, checkpoint_file):
                               # persistent_workers=True
                               )
 
-    # num_training_steps = len(train_loader) * NUM_EPOCHS
-    # lr_scheduler = get_scheduler("linear", optimizer=optimizer, num_warmup_steps=0,
-    #                              num_training_steps=num_training_steps)
-
     if checkpoint_file:
+        # Restore optimizer state
         optimizer.load_state_dict(checkpoint['optimizer'])
         # lr_scheduler.load_state_dict(checkpoint['scheduler'])
         del checkpoint
 
+    # Clear memory
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -241,7 +236,6 @@ def train(rank, world_size, lang_encoder_path, tokenizer_path, checkpoint_file):
 
         total_batches_to_process = batches_per_epoch - batches_to_skip
 
-        # train_sampler.set_epoch(epoch)
         progress_bar = tqdm(train_loader, desc=f"Rank {rank} - Epoch {epoch}", total=total_batches_to_process)
         for i, batch in enumerate(progress_bar, start=1):
             try:
@@ -270,7 +264,9 @@ def train(rank, world_size, lang_encoder_path, tokenizer_path, checkpoint_file):
                 # torch.cuda.empty_cache()
 
                 if rank == 0:
+                    # WANDB logging on first process
                     wandb.log({"global_step": global_step, "epoch": epoch, "loss": loss.item()})
+
                     # Save every SAVE_STEPS steps
                     if global_step > 0 and global_step % SAVE_STEPS == 0:
                         print(f"Saving checkpoint at step {global_step}")
@@ -286,6 +282,7 @@ def train(rank, world_size, lang_encoder_path, tokenizer_path, checkpoint_file):
 
                 global_step += 1
             except Exception as e:
+                # Handle exceptions such as OOM gracefully..
                 print(f'[{rank}] Step failed: {e}')
                 torch.cuda.empty_cache()
                 optimizer.zero_grad()

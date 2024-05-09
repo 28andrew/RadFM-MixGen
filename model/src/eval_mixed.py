@@ -20,7 +20,7 @@ def main(checkpoint_num):
     files = glob.glob(f'../output/inference-mixed-finetuned-mixed-{checkpoint_num}.pt-rank*.csv')
     print(f'File count: {len(files)}')
 
-    # Pred
+    # Read predictions
     pred = {}
     for path in files:
         with open(path, 'r') as file:
@@ -28,9 +28,9 @@ def main(checkpoint_num):
             for row in reader:
                 pred[int(row['idx'])] = row['prediction']
 
-    print(f'Pred count: {len(pred)}')
+    print(f'Prediction count: {len(pred)}')
 
-    # Split pred into findings and predictions:
+    # Split predictions into findings and predictions:
     pred_findings_d = {}
     pred_impressions_d = {}
     for idx, text in pred.items():
@@ -52,7 +52,7 @@ def main(checkpoint_num):
     pred_findings = [pred_findings_d[key] for key in sorted(pred_findings_d.keys())]
     pred_impressions = [pred_impressions_d[key] for key in sorted(pred_impressions_d.keys())]
 
-    # Ref
+    # Read references
     print('Loading interpret-cxr-test-public dataset')
     dataset = datasets.load_dataset("StanfordAIMI/interpret-cxr-test-public")['test']
     findings_idxs = []
@@ -71,9 +71,9 @@ def main(checkpoint_num):
 
         i += 1
 
-    # Eval
-    print(f'{len(findings_idxs)}, last few: {findings_idxs[-10:]}')
-    print(f'pred_findings len: {len(pred_findings)}')
+    # Run evaluation
+    # print(f'{len(findings_idxs)}, last few: {findings_idxs[-10:]}')
+    # print(f'pred_findings len: {len(pred_findings)}')
     pred_findings = [process(pred_findings[i]) for i in findings_idxs]
     pred_impressions = [process(pred_impressions[i]) for i in impressions_idxs]
 
