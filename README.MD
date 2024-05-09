@@ -4,7 +4,8 @@ This is the code for our approach, including dataset creation, model fine-tuning
 
 # Environment Setup
 - Create a Conda environment based on the provided `environment.yml`.
-- Install [en_score_sci_lg==0.5.3](https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.3/en_core_sci_lg-0.5.3.tar.gz) via pip.
+- Install [en_score_sci_lg==0.5.3](https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.3/en_core_sci_lg-0.5.3.tar.gz) into this environment.
+- Create another Conda environment based on `environment_eval.yml` which will be used only for calculating metrics. 
 
 # Dataset Download and MixGen Generation
 - Complete the required training to gain access to the competition dataset, [interpret-cxr-public](https://huggingface.co/datasets/StanfordAIMI/interpret-cxr-public).
@@ -23,4 +24,4 @@ This is the code for our approach, including dataset creation, model fine-tuning
 # Testing
 - Change the working directory to `model/src`
 - Run `inference_mixed.py` with the checkpoint number as the only argument and the inferences will be saved to `model/output` in files where their names indicate the checkpoint and GPU used for inference. The inferences are saved in multiple files, with one per GPU used for inference.
-- Run `eval_mixed.py` with the checkpoint number as the only argument to calculate evaluation metrics on the inference outputs.
+- Activate the evaluation Conda environment and run `eval_mixed.py` with the checkpoint number as the only argument to calculate evaluation metrics on the inference outputs.
